@@ -169,28 +169,34 @@ func (r *RuleReadinessController) processNodeAgainstAllRules(ctx context.Context
 
 			patch := client.MergeFrom(latestRule.DeepCopy())
 
-			// update only this specific node evaluation status
-			currEval := readinessv1alpha1.NodeEvaluation{}
-			for _, eval := range rule.Status.NodeEvaluations {
-				if eval.NodeName == node.Name {
-					currEval = eval
+			// Upsert the node's evaluation only when evaluateRuleForNode produced
+			// one. On the failure path it returns before updateNodeEvaluationStatus
+			// runs, so writing the zero value here would either clobber a valid
+			// prior entry or append one with an empty NodeName, which the CRD
+			// rejects (MinLength=1) and would fail the whole status patch — taking
+			// the FailedNodes update below down with it.
+			var currEval *readinessv1alpha1.NodeEvaluation
+			for i := range rule.Status.NodeEvaluations {
+				if rule.Status.NodeEvaluations[i].NodeName == node.Name {
+					currEval = &rule.Status.NodeEvaluations[i]
 					break
 				}
 			}
-
-			found := false
-			for i := range latestRule.Status.NodeEvaluations {
-				if latestRule.Status.NodeEvaluations[i].NodeName == node.Name {
-					latestRule.Status.NodeEvaluations[i] = currEval
-					found = true
-					break
+			if currEval != nil {
+				found := false
+				for i := range latestRule.Status.NodeEvaluations {
+					if latestRule.Status.NodeEvaluations[i].NodeName == node.Name {
+						latestRule.Status.NodeEvaluations[i] = *currEval
+						found = true
+						break
+					}
 				}
-			}
-			if !found {
-				latestRule.Status.NodeEvaluations = append(
-					latestRule.Status.NodeEvaluations,
-					currEval,
-				)
+				if !found {
+					latestRule.Status.NodeEvaluations = append(
+						latestRule.Status.NodeEvaluations,
+						*currEval,
+					)
+				}
 			}
 
 			// handle status.FailedNodes for this node
