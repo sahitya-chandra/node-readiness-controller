@@ -147,12 +147,13 @@ func (r *RuleReadinessController) processNodeAgainstAllRules(ctx context.Context
 			"rule", rule.Name,
 			"ruleResourceVersion", rule.ResourceVersion)
 
-		if err := r.evaluateRuleForNode(ctx, rule, node); err != nil {
-			log.Error(err, "Failed to evaluate rule for node",
+		evalErr := r.evaluateRuleForNode(ctx, rule, node)
+		if evalErr != nil {
+			log.Error(evalErr, "Failed to evaluate rule for node",
 				"node", node.Name, "rule", rule.Name)
 			// Continue with other rules even if one fails
-			r.recordNodeFailure(rule, node.Name, "EvaluationError", err.Error())
-			errs = append(errs, err)
+			r.recordNodeFailure(rule, node.Name, "EvaluationError", evalErr.Error())
+			errs = append(errs, evalErr)
 		}
 
 		// Persist the rule status
@@ -169,20 +170,18 @@ func (r *RuleReadinessController) processNodeAgainstAllRules(ctx context.Context
 
 			patch := client.MergeFrom(latestRule.DeepCopy())
 
-			// Upsert the node's evaluation only when evaluateRuleForNode produced
-			// one. On the failure path it returns before updateNodeEvaluationStatus
-			// runs, so writing the zero value here would either clobber a valid
-			// prior entry or append one with an empty NodeName, which the CRD
-			// rejects (MinLength=1) and would fail the whole status patch — taking
-			// the FailedNodes update below down with it.
-			var currEval *readinessv1alpha1.NodeEvaluation
-			for i := range rule.Status.NodeEvaluations {
-				if rule.Status.NodeEvaluations[i].NodeName == node.Name {
-					currEval = &rule.Status.NodeEvaluations[i]
-					break
+			// Upsert the node's evaluation only after a successful evaluation.
+			// On the failure path evaluateRuleForNode returns before recording a
+			// fresh NodeEvaluation, so this must leave any existing persisted
+			// evaluation untouched and only persist FailedNodes below.
+			if evalErr == nil {
+				var currEval *readinessv1alpha1.NodeEvaluation
+				for i := range rule.Status.NodeEvaluations {
+					if rule.Status.NodeEvaluations[i].NodeName == node.Name {
+						currEval = &rule.Status.NodeEvaluations[i]
+						break
+					}
 				}
-			}
-			if currEval != nil {
 				found := false
 				for i := range latestRule.Status.NodeEvaluations {
 					if latestRule.Status.NodeEvaluations[i].NodeName == node.Name {

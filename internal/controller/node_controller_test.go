@@ -1118,5 +1118,112 @@ var _ = Describe("Node Controller", func() {
 			Expect(persisted.Status.NodeEvaluations).To(ContainElement(
 				HaveField("NodeName", untouchedNode)))
 		})
+
+		It("preserves the existing target NodeEvaluation when recording a failure", func() {
+			ctx := context.Background()
+			testScheme := runtime.NewScheme()
+			Expect(corev1.AddToScheme(testScheme)).To(Succeed())
+			Expect(nodereadinessiov1alpha1.AddToScheme(testScheme)).To(Succeed())
+
+			const (
+				targetNode  = "stale-eval-node"
+				targetRule  = "stale-eval-rule"
+				targetTaint = "readiness.k8s.io/stale-eval-taint"
+			)
+
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   targetNode,
+					Labels: map[string]string{"readiness-test": "stale-eval"},
+				},
+				Status: corev1.NodeStatus{
+					Conditions: []corev1.NodeCondition{
+						{Type: "Ready", Status: corev1.ConditionFalse},
+					},
+				},
+			}
+
+			persistedEval := nodereadinessiov1alpha1.NodeEvaluation{
+				NodeName: targetNode,
+				ConditionResults: []nodereadinessiov1alpha1.ConditionEvaluationResult{
+					{
+						Type:           "Ready",
+						CurrentStatus:  corev1.ConditionTrue,
+						RequiredStatus: corev1.ConditionTrue,
+					},
+				},
+				TaintStatus:        nodereadinessiov1alpha1.TaintStatusAbsent,
+				LastEvaluationTime: metav1.Now(),
+			}
+			staleCachedEval := persistedEval
+			staleCachedEval.TaintStatus = nodereadinessiov1alpha1.TaintStatusPresent
+
+			rule := &nodereadinessiov1alpha1.NodeReadinessRule{
+				ObjectMeta: metav1.ObjectMeta{Name: targetRule},
+				Spec: nodereadinessiov1alpha1.NodeReadinessRuleSpec{
+					Conditions: []nodereadinessiov1alpha1.ConditionRequirement{
+						{Type: "Ready", RequiredStatus: corev1.ConditionTrue},
+					},
+					Taint: corev1.Taint{
+						Key:    targetTaint,
+						Effect: corev1.TaintEffectNoSchedule,
+					},
+					NodeSelector: metav1.LabelSelector{
+						MatchLabels: map[string]string{"readiness-test": "stale-eval"},
+					},
+					EnforcementMode: nodereadinessiov1alpha1.EnforcementModeContinuous,
+				},
+				Status: nodereadinessiov1alpha1.NodeReadinessRuleStatus{
+					NodeEvaluations: []nodereadinessiov1alpha1.NodeEvaluation{persistedEval},
+				},
+			}
+			cachedRule := rule.DeepCopy()
+			cachedRule.Status.NodeEvaluations = []nodereadinessiov1alpha1.NodeEvaluation{staleCachedEval}
+
+			fc := fakeclient.NewClientBuilder().
+				WithScheme(testScheme).
+				WithObjects(node, rule).
+				WithStatusSubresource(rule).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						if _, ok := obj.(*corev1.Node); ok && obj.GetName() == targetNode {
+							return apierrors.NewForbidden(corev1.Resource("nodes"), obj.GetName(), nil)
+						}
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				}).
+				Build()
+
+			controller := &RuleReadinessController{
+				Client:        fc,
+				Scheme:        testScheme,
+				clientset:     fake.NewSimpleClientset(),
+				ruleCache:     make(map[string]*nodereadinessiov1alpha1.NodeReadinessRule),
+				EventRecorder: record.NewFakeRecorder(10),
+			}
+			controller.updateRuleCache(ctx, cachedRule)
+
+			reconciler := &NodeReconciler{
+				Client:     fc,
+				Scheme:     testScheme,
+				Controller: controller,
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: targetNode},
+			})
+			Expect(err).To(HaveOccurred(),
+				"Reconcile propagates the evaluation error so controller-runtime requeues")
+
+			persisted := &nodereadinessiov1alpha1.NodeReadinessRule{}
+			Expect(fc.Get(ctx, types.NamespacedName{Name: targetRule}, persisted)).To(Succeed())
+
+			Expect(persisted.Status.FailedNodes).To(HaveLen(1))
+			Expect(persisted.Status.FailedNodes[0].NodeName).To(Equal(targetNode))
+			Expect(persisted.Status.NodeEvaluations).To(HaveLen(1))
+			Expect(persisted.Status.NodeEvaluations[0].NodeName).To(Equal(targetNode))
+			Expect(persisted.Status.NodeEvaluations[0].TaintStatus).To(Equal(
+				nodereadinessiov1alpha1.TaintStatusAbsent))
+		})
 	})
 })
