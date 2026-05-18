@@ -3,8 +3,8 @@
 
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│ NodeReadiness   │    │ ReadinessGate    │    │ Validation      │
-│ GateRule CRD    │────▶ Controller       │    │ Webhook         │
+│ NodeReadiness   │    │ NodeReadiness    │    │ Validation      │
+│ Rule CRD        │────▶ Controller       │    │ Webhook         │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
                                 │                       │
                                 ▼                       │
@@ -31,7 +31,7 @@ graph TB
     %% Controller Components
     RuleRec --> Cache[Rule Cache]
     NodeRec[NodeReconciler] --> Cache
-    Cache --> Controller[ReadinessGateController]
+    Cache --> Controller[NodeReadinessController]
 
     %% Node Processing
     Nodes[Kubernetes Nodes] --> NodeRec
@@ -73,14 +73,14 @@ graph TB
 #### 1. NodeReadinessRule CRD
 - Defines rules mapping multiple node conditions to a single taint
 - Supports bootstrap-only and continuous enforcement modes
-- Allows node selector targeting and grace periods
+- Allows node selector targeting for scoped enforcement
 
 #### 2. ReadinessGateController
 - **RuleReconciler**: Processes rule changes and updates internal cache
 - **NodeReconciler**: Handles node condition changes and evaluates applicable rules
 - Manages taint addition/removal based on condition satisfaction
 
-#### 3. [WIP] Validation Webhook
+#### 3. Validation Webhook
 - Prevents conflicting rules (same taint key with overlapping node selectors)
 - Validates rule specifications and required fields
 - Ensures system consistency and prevents misconfigurations

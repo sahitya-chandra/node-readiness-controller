@@ -123,14 +123,24 @@ func (w *NodeReadinessRuleWebhook) nodeSelectorsOverlap(selector1, selector2 met
 		return true
 	}
 
-	// Check overlap: if one selector's matchLabels is a subset of the other,
-	// a node could match both selectors, causing a conflict.
-	// Note: this only covers matchLabels-based overlap; selectors using
-	// matchExpressions may still overlap without being detected here.
-	if sel1.Matches(labels.Set(selector2.MatchLabels)) {
-		return true
+	// Build a candidate label set by merging both selectors' matchLabels.
+	// If the same key appears in both with different values the selectors are
+	// disjoint and cannot overlap.
+	merged := make(labels.Set)
+	for k, v := range selector1.MatchLabels {
+		merged[k] = v
 	}
-	return sel2.Matches(labels.Set(selector1.MatchLabels))
+	for k, v := range selector2.MatchLabels {
+		if existing, ok := merged[k]; ok && existing != v {
+			return false
+		}
+		merged[k] = v
+	}
+
+	// Both selectors must match the merged candidate for overlap to be possible.
+	// Note: selectors using matchExpressions that introduce requirements beyond
+	// matchLabels may still overlap without being detected here.
+	return sel1.Matches(merged) && sel2.Matches(merged)
 }
 
 // generateNoExecuteWarnings generates admission warnings for NoExecute taint usage.
